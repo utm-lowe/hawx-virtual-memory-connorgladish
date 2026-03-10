@@ -20,30 +20,21 @@ static void free_range(void *, void *);
 ///////////////////////////////////////////////////////////////////////////////
 // Global Definitions
 ///////////////////////////////////////////////////////////////////////////////
-extern char end[]; // first address after kernel.
-                   // defined by kernel.ld.
-
+extern char end[];
 struct frame {
   struct frame *next;
 };
 
 struct frame *frame_table;
-
-/*
- * the kernel's page table.
- */
 pagetable_t kernel_pagetable;
-
-extern char etext[];  // kernel.ld sets this to end of kernel code.
-
-extern char trampoline[]; // trampoline.S
+extern char etext[];
+extern char trampoline[];
 
 
 ///////////////////////////////////////////////////////////////////////////////
 // Page Allocation and Virtual Memory API
 ///////////////////////////////////////////////////////////////////////////////
 
-// Initialize Virtual memory and activate paging.
 void
 vm_init(void)
 {
@@ -54,136 +45,113 @@ vm_init(void)
 }
 
 
-// Allocate one 4096-byte page of physical memory.
-// Returns a pointer that the kernel can use.
-// Returns 0 if the memory cannot be allocated.
 void *
 vm_page_alloc(void)
 {
-  // This function should return the first frame from the frame_table
-  // linked list. It shoudl also advance the frame_table pointer to
-  // the next available frame. Be sure to check to see if a frame is
-  // available, and return 0 if it is not. For a hint of how the frame
-  // table is structured, please see the "free_range" helper fucntion.
-  // YOUR CODE HERE
-
-  return 0x00;
+  struct frame *f = frame_table;
+  if (f == 0)
+    return 0;
+  frame_table = f->next;
+  memset((void*)f, 0, PGSIZE);
+  return (void*)f;
 }
 
 
-// Free the page of physical memory pointed at by v,
-// which normally should have been returned by a
-// call to vm_page_alloc().  (The exception is when
-// initializing the allocator; see kinit above.)
 void
 vm_page_free(void *pa)
 {
-  // This function should link this physical page back into the frame
-  // table. The deallocated page should be come the first free frame
-  // in the table.
-  // YOUR CODE HERE
+  struct frame *f = (struct frame*)pa;
+  f->next = frame_table;
+  frame_table = f;
 }
 
 
-// create an empty page table.
-// returns 0 if out of memory.
 pagetable_t
 vm_create_pagetable(void)
 {
   pagetable_t pagetable;
-  // This function should do the following:
-  //   1.) Allocate a page frame to store the table.
-  //   2.) Set the contents of the entire page to zero, thus 
-  //      marking every PTE as invalid.
-  // If a page cannot be allocated, this function should return 0.
-  // YOUR CODE HERE
-
+  pagetable = (pagetable_t)vm_page_alloc();
+  if (pagetable == 0)
+    return 0;
+  memset(pagetable, 0, PGSIZE);
   return pagetable;
 }
 
 
-// Look up a virtual address, return the physical address,
-// or 0 if not mapped.
 uint64
 vm_lookup(pagetable_t pagetable, uint64 va)
 {
-  // This function should use walk_pgtable to look up a page table
-  // entry for the given virtual address. If the entry is invalid,
-  // return 0. If the entry is valid, convert it to a physical 
-  // address and return the physical address.
-  // HINT: This function is subtely different than the corresponding
-  //       function in XV6. Take care when copying!
-  // YOUR CODE HERE
+  pte_t *pte;
 
+  if (va >= MAXVA)
+    return 0;
+
+  pte = walk_pgtable(pagetable, va, 0);
+  if (pte == 0)
+    return 0;
+  if (!(*pte & PTE_V))
+    return 0;
+
+  return PTE2PA(*pte);
+}
+
+
+int
+vm_page_insert(pagetable_t pagetable, uint64 va, uint64 pa, int perm)
+{
+  pte_t *pte;
+
+  va = PGROUNDDOWN(va);
+
+  pte = walk_pgtable(pagetable, va, 1);
+  if (pte == 0)
+    return -1;
+  if (*pte & PTE_V)
+    panic("remap");
+
+  *pte = PA2PTE(pa) | perm | PTE_V;
   return 0;
 }
 
 
-// Insert a page into the page table which maps the page containing
-// the virtual address va onto the page frame at the physical address
-// pa. va can be any arbitrary address, but pa must be aligned to
-// a physical page. Returns 0 on success, -1 on failure.
-int
-vm_page_insert(pagetable_t pagetable, uint64 va, uint64 pa, int perm)
-{
-    // This function should round va down to to a page address. After
-    // doing this, use walk_pgtable to find the correct page table
-    // entry. If the address is already present, panic with the
-    // message 'remap'. If the address is not present, add the pte for
-    // the mapping with permissions specified by perm.
-    // Return 0 on success, -1 on failure. 
-    // HINT: You will have to use walk_pgtable's allocation abilities.
-    //       Ask yourself, how can this function fail without
-    //       panicking?
-    // YOUR CODE HERE
-
-    return -1;
-}
-
-
-// Remove npages of mappings starting from va. va must be
-// page-aligned. The mappings must exist.
-// Optionally free the physical memory.
 void
 vm_page_remove(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
 {
-  // This function should use walk_pgtable to find the corresponding
-  // entry for the virtual address va. If the pte is not found, or if
-  // the page is not present, then this function should panic. If
-  // do_free is set to 1, this function should deallocate the
-  // corresponding physical page frame.
-  // YOUR CODE HERE
+  pte_t *pte;
+
+  for (uint64 i = 0; i < npages; i++, va += PGSIZE) {
+    pte = walk_pgtable(pagetable, va, 0);
+    if (pte == 0)
+      panic("vm_page_remove: walk_pgtable returned 0");
+    if (!(*pte & PTE_V))
+      panic("vm_page_remove: page not present");
+    if (do_free)
+      vm_page_free((void*)PTE2PA(*pte));
+    *pte = 0;
+  }
 }
 
 
-// Map a block of virtual memory which is size bytes long and begins
-// at virtual address va. This function allocates page frames as
-// needed. Each allocated page recieves permissions specified by perm.
-// On success, this function returns 0, on failure it returns -1.
 int
 vm_map_range(pagetable_t pagetable, uint64 va, uint64 size, int perm)
 {
-    // Loop through each virtual address pages. Note that va is not
-    // necessarily page alligned, and so you must round it down.
-    // We will allocate a new physical page frame for each page, and
-    // then use vm_page_insert to add the page to the table.
-    // YOUR CODE HERE
-    return -1;
+  uint64 a = PGROUNDDOWN(va);
+  uint64 last = PGROUNDDOWN(va + size - 1);
+  void *pa;
+
+  for (; a <= last; a += PGSIZE) {
+    pa = vm_page_alloc();
+    if (pa == 0)
+      return -1;
+    if (vm_page_insert(pagetable, a, (uint64)pa, perm) != 0) {
+      vm_page_free(pa);
+      return -1;
+    }
+  }
+  return 0;
 }
 
 
-// Return the address of the PTE in page table pagetable
-// that corresponds to virtual address va.  If alloc!=0,
-// create any required page-table pages.
-//
-// The risc-v Sv39 scheme has three levels of page-table
-// pages. A page-table page contains 512 64-bit PTEs.
-// A 64-bit virtual address is split into five fields:
-//   39..63 -- must be zero.
-//   30..38 -- 9 bits of level-2 index.
-//   21..29 -- 9 bits of level-1 index.
-//   12..20 -- 9 bits of level-0 index.
-//    0..11 -- 12 bits of byte offset within the page.
 pte_t * 
 walk_pgtable(pagetable_t pagetable, uint64 va, int alloc)
 {
@@ -209,7 +177,6 @@ walk_pgtable(pagetable_t pagetable, uint64 va, int alloc)
 // Static Helper Functions
 ///////////////////////////////////////////////////////////////////////////////
 
-// Make a direct-map page table for the kernel.
 static pagetable_t
 make_kernel_pagetable(void)
 {
@@ -218,37 +185,18 @@ make_kernel_pagetable(void)
   kpgtbl = (pagetable_t) vm_page_alloc();
   memset(kpgtbl, 0, PGSIZE);
 
-  // uart registers
   kernel_map_pages(kpgtbl, UART0, UART0, PGSIZE, PTE_R | PTE_W);
-
-  // virtio mmio disk interface
   kernel_map_pages(kpgtbl, VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
-
-  // PLIC
   kernel_map_pages(kpgtbl, PLIC, PLIC, 0x400000, PTE_R | PTE_W);
-
-  // map kernel text executable and read-only.
   kernel_map_pages(kpgtbl, KERNBASE, KERNBASE, (uint64)etext-KERNBASE, PTE_R | PTE_X);
-
-  // map kernel data and the physical RAM we'll make use of.
   kernel_map_pages(kpgtbl, PGROUNDUP((uint64)etext), PGROUNDUP((uint64)etext),
   PHYSTOP-PGROUNDUP((uint64)etext), PTE_R | PTE_W);
-
-  // map the trampoline for trap entry/exit to
-  // the highest virtual address in the kernel.
   kernel_map_pages(kpgtbl, TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
-
 
   return kpgtbl;
 }
 
 
-
-
-
-// add a mapping to the kernel page table.
-// only used when booting.
-// does not flush TLB or enable paging.
 static void
 kernel_map_pages(pagetable_t kpgtbl, uint64 va, uint64 pa, uint64 sz, int perm)
 {
@@ -257,21 +205,21 @@ kernel_map_pages(pagetable_t kpgtbl, uint64 va, uint64 pa, uint64 sz, int perm)
 }
 
 
-// Create PTEs for virtual addresses starting at va that refer to
-// physical addresses starting at pa. va and size might not
-// be page-aligned. Returns 0 on success, -1 if walk_pgtable() couldn't
-// allocate a needed page-table page.
 static int
 kernel_map_range(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
 {
-  // This is very similar to the vm_map_range function. The only
-  // difference is that this function is given the first physical page
-  // in pa, and it will map continiguous page frames beginning at this
-  // address. It will not use vm_page_alloc as the memory used by this
-  // function is already set aside by the freerange for the use of the
-  // kernel. This function will only be used at boot time.
-  // YOUR CODE HERE
-  return -1;
+  uint64 a = PGROUNDDOWN(va);
+  uint64 last = PGROUNDDOWN(va + size - 1);
+
+  for (; a <= last; a += PGSIZE, pa += PGSIZE) {
+    pte_t *pte = walk_pgtable(pagetable, a, 1);
+    if (pte == 0)
+      return -1;
+    if (*pte & PTE_V)
+      panic("kernel_map_range: remap");
+    *pte = PA2PTE(pa) | perm | PTE_V;
+  }
+  return 0;
 }
 
 
@@ -285,19 +233,7 @@ free_range(void *pa_start, void *pa_end)
   }
 }
 
-
-///////////////////////////////////////////////////////////////////////////////
-// Unit Tests below this line. Do not change any part of the
-// following!
-///////////////////////////////////////////////////////////////////////////////
-
-
-// Copy from user to kernel.
-// Copy len bytes to dst from virtual address srcva in a given page table.
-// Return 0 on success, -1 on error.
 int vm_copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len) {
-  // This function's code was essentially just copied from xv6. Studying
-  // this may help you understand virtual memory better!
   uint64 n, va0, pa0;
 
   while (len > 0) {
@@ -317,12 +253,7 @@ int vm_copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len) {
   return 0;
 }
 
-// Copy from kernel to user.
-// Copy len bytes from src to virtual address dstva in a given page table.
-// Return 0 on success, -1 on error.
 int vm_copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len) {
-  // This function's code was essentially just copied from xv6. Studying
-  // this may help you understand virtual memory better!
   uint64 n, va0, pa0;
 
   while (len > 0) {
